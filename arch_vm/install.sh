@@ -248,11 +248,49 @@ if [ "$INSTALL_PKGS" -eq 1 ]; then
     fi
 fi
 
+
+ensure_psi_enabled() {
+    if grep -qw 'psi=1' /proc/cmdline 2>/dev/null; then
+        log_ok "Kernel PSI is already enabled."
+        return 0
+    fi
+
+    if [ ! -f /etc/default/grub ]; then
+        log_warn "Kernel PSI is not enabled and /etc/default/grub was not found."
+        log_warn "Add 'psi=1' to the VM kernel command line manually."
+        return 0
+    fi
+
+    if grep -Eq '^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=.*(^|[[:space:]])psi=1([[:space:]]|")' /etc/default/grub; then
+        log_ok "Kernel PSI boot option is already configured; reboot is required."
+        return 0
+    fi
+
+    if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
+        sed -i -E 's/^(GRUB_CMDLINE_LINUX_DEFAULT=")(.*)"/\1\2 psi=1"/' /etc/default/grub
+    else
+        printf '%s\n' 'GRUB_CMDLINE_LINUX_DEFAULT="psi=1"' >> /etc/default/grub
+    fi
+
+    if command -v grub-mkconfig >/dev/null 2>&1; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+        log_ok "Configured kernel PSI boot option: psi=1"
+        log_warn "Reboot is required before Waydroid can use PSI."
+    else
+        log_warn "Added psi=1 to /etc/default/grub, but grub-mkconfig was not found."
+        log_warn "Regenerate the bootloader configuration manually before rebooting."
+    fi
+}
+
 # ------------------------------------------------------------------------------
 # 2. Install System Components
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_SYSTEM" -eq 1 ]; then
     log_info "Installing system components..."
+
+    # Waydroid LMKD requires PSI. Enable it explicitly for VM kernels that
+    # build CONFIG_PSI_DEFAULT_DISABLED=y.
+    ensure_psi_enabled
 
     # 2-1. /usr/local/sbin/waydroid-prepare
     install -d /usr/local/sbin

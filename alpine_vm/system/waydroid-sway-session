@@ -26,6 +26,8 @@ SWAYSOCK=
 CLEANING=0
 CONTAINER_FAILURES=0
 CONTAINER_FAILURE_LIMIT=${CONTAINER_FAILURE_LIMIT:-3}
+ANDROID_WAS_BOOTED=0
+ANDROID_REBOOTING=0
 RUN_UID=$(id -u)
 RUN_GID=$(id -g)
 PRIV_CMD=
@@ -62,12 +64,13 @@ container_is_running()
         grep -q 'Container:[[:space:]]*RUNNING'
 }
 
+android_is_booted()
+{
+    [ "$(run_root waydroid shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]
+}
+
 start_waydroid_ui()
 {
-    if is_running "$UI_PID"; then
-        return 0
-    fi
-
     log "starting Waydroid full UI on $WAYLAND_DISPLAY"
     waydroid show-full-ui >> /tmp/waydroid-ui.log 2>&1 &
     UI_PID=$!
@@ -347,13 +350,22 @@ while is_running "$SWAY_PID" && \
     if container_is_running; then
         CONTAINER_FAILURES=0
 
-        # Android reboot can destroy the Waydroid UI surface while the
-        # container, session, compositor and VNC server remain alive.  In that
-        # case show-full-ui exits, so recreate only the Android UI instead of
-        # restarting Sway/WayVNC and the whole Waydroid runtime.
-        if ! is_running "$UI_PID"; then
-            log "Waydroid UI exited; recreating full UI"
-            start_waydroid_ui
+        # show-full-ui is a one-shot request and may exit while the UI remains
+        # healthy, so its PID cannot be used as a health check.  Detect an
+        # Android reboot by observing sys.boot_completed transition away from
+        # 1 and back to 1, then recreate the UI once after Android is ready.
+        if android_is_booted; then
+            if [ "$ANDROID_REBOOTING" -eq 1 ]; then
+                log "Android reboot completed; recreating full UI"
+                start_waydroid_ui
+                ANDROID_REBOOTING=0
+            fi
+            ANDROID_WAS_BOOTED=1
+        elif [ "$ANDROID_WAS_BOOTED" -eq 1 ]; then
+            if [ "$ANDROID_REBOOTING" -eq 0 ]; then
+                log "Android reboot detected; waiting for boot completion"
+            fi
+            ANDROID_REBOOTING=1
         fi
     else
         CONTAINER_FAILURES=$((CONTAINER_FAILURES + 1))

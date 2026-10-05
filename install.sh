@@ -87,6 +87,19 @@ detect_os() {
 TARGET=""
 FORWARD_ARGS=()
 
+if [ "$(id -u)" -ne 0 ]; then
+    printf "${RED}[ERROR] This installer requires root privileges.${NC}\n" >&2
+    if command -v doas >/dev/null 2>&1; then
+        printf "Run: ${BLUE}doas %s" "$0" >&2
+    elif command -v sudo >/dev/null 2>&1; then
+        printf "Run: ${BLUE}sudo %s" "$0" >&2
+    else
+        printf "Re-run this installer as root: ${BLUE}%s" "$0" >&2
+    fi
+    printf " %s${NC}\n" "$*" >&2
+    exit 1
+fi
+
 # Parse first argument if it explicitly specifies the target
 if [ $# -gt 0 ]; then
     case "$1" in

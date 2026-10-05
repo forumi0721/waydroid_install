@@ -1,0 +1,548 @@
+#!/bin/bash
+
+set -u
+
+LXC_CONFIG=/var/lib/waydroid/lxc/waydroid/config
+LXC_BASE_CONFIG=/usr/lib/waydroid/data/configs/config_base
+WAYDROID_CFG=/var/lib/waydroid/waydroid.cfg
+WAYDROID_PROP=/var/lib/waydroid/waydroid.prop
+WAYDROID_BASE_PROP=/var/lib/waydroid/waydroid.prop
+HARDWARE_MANAGER=/usr/lib/waydroid/tools/services/hardware_manager.py
+RRO_SOURCE=/var/lib/waydroid/rro
+RRO_TARGET=/var/lib/waydroid/overlay/system/product/overlay
+
+XDG_RUNTIME_DIR=/run/user/$(id -u)
+DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+WAYLAND_DISPLAY=wayland-0
+
+VNC_BIND=${VNC_BIND:-0.0.0.0}
+VNC_PORT=${VNC_PORT:-5900}
+VNC_FPS=${VNC_FPS:-15}
+SWAY_CONFIG=$XDG_RUNTIME_DIR/sway-waydroid.conf
+
+ADB_BIND=${ADB_BIND:-}
+ADB_PORT=${ADB_PORT:-5555}
+ANDROID_IP=${ANDROID_IP:-}
+
+DBUS_PID=
+PULSE_STARTED=0
+SWAY_PID=
+WAYVNC_PID=
+SESSION_PID=
+UI_PID=
+SOCAT_PID=
+SWAYSOCK=
+CLEANING=0
+CONTAINER_FAILURES=0
+CONTAINER_FAILURE_LIMIT=${CONTAINER_FAILURE_LIMIT:-3}
+RUN_UID=$(id -u)
+RUN_GID=$(id -g)
+
+export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY
+export WLR_BACKENDS=headless
+export WLR_HEADLESS_OUTPUTS=1
+export WLR_LIBINPUT_NO_DEVICES=1
+export WLR_RENDERER=pixman
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+
+log()
+{
+    printf '%s\n' "[waydroid-sway] $*"
+}
+
+run_root()
+{
+    if [ "$RUN_UID" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+is_running()
+{
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null
+}
+
+container_is_running()
+{
+    waydroid status 2>/dev/null |
+        grep -q 'Container:[[:space:]]*RUNNING'
+}
+
+cleanup()
+{
+    [ "$CLEANING" -eq 0 ] || return 0
+    CLEANING=1
+    trap - EXIT INT TERM HUP
+
+    log "stopping remote display and Waydroid session"
+
+    is_running "$WAYVNC_PID" && kill "$WAYVNC_PID" 2>/dev/null
+    is_running "$SOCAT_PID" && kill "$SOCAT_PID" 2>/dev/null
+    is_running "$UI_PID" && kill "$UI_PID" 2>/dev/null
+
+    waydroid session stop >/dev/null 2>&1 || true
+    is_running "$SESSION_PID" && kill "$SESSION_PID" 2>/dev/null
+
+    is_running "$SWAY_PID" && kill "$SWAY_PID" 2>/dev/null
+
+    # This host is dedicated to this root Waydroid session.  Clean an instance
+    # inherited from an earlier interrupted run as well as one started here.
+    pulseaudio --kill >/dev/null 2>&1 || true
+    pkill -x gsettings-helper 2>/dev/null || true
+    is_running "$DBUS_PID" && kill "$DBUS_PID" 2>/dev/null
+    pkill -f "^dbus-daemon --session --address=unix:path=$XDG_RUNTIME_DIR/bus " \
+        2>/dev/null || true
+
+    run_root waydroid container stop >/dev/null 2>&1 || true
+    run_root /etc/init.d/waydroid-container stop >/dev/null 2>&1 || true
+    run_root pkill -f '^supervise-daemon waydroid-container ' 2>/dev/null || true
+    run_root pkill -f '^python3 /usr/bin/waydroid container start$' 2>/dev/null || true
+    run_root pkill -f "^socat TCP-LISTEN:${ADB_PORT}," 2>/dev/null || true
+    run_root pkill -f "^/usr/bin/socat TCP-LISTEN:${ADB_PORT}," 2>/dev/null || true
+    run_root pkill -f "^adb -L tcp:" 2>/dev/null || true
+
+    rm -f "$SWAY_CONFIG"
+    rm -f "$XDG_RUNTIME_DIR/bus" "$XDG_RUNTIME_DIR/pulse/native" \
+        2>/dev/null || true
+    run_root rm -f /run/waydroid-container.pid 2>/dev/null || true
+
+    wait 2>/dev/null || true
+    log "stopped"
+}
+
+set_waydroid_property() {
+    local key="$1"
+    local value="$2"
+    local cfg="${WAYDROID_CFG:-/var/lib/waydroid/waydroid.cfg}"
+    local tmp mode owner group
+
+    [ -f "$cfg" ] || {
+        echo "ERROR: config not found: $cfg" >&2
+        return 1
+    }
+
+    case "$key$value" in
+        *'
+'*)
+            echo "ERROR: key/value must not contain newlines" >&2
+            return 1
+            ;;
+    esac
+
+    mode="$(stat -c '%a' "$cfg")"
+    owner="$(stat -c '%u' "$cfg")"
+    group="$(stat -c '%g' "$cfg")"
+	tmp="$(mktemp "${TMPDIR:-/tmp}/waydroid.cfg.XXXXXX")" || return 2
+
+    if ! CFG_KEY="$key" CFG_VALUE="$value" awk '
+    BEGIN {
+        key = ENVIRON["CFG_KEY"]
+        value = ENVIRON["CFG_VALUE"]
+
+        in_properties = 0
+        properties_found = 0
+        property_written = 0
+    }
+
+    /^[[:space:]]*\[properties\][[:space:]]*$/ {
+        in_properties = 1
+        properties_found = 1
+        print
+        next
+    }
+
+    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
+        if (in_properties && !property_written) {
+            print key " = " value
+            property_written = 1
+        }
+
+        in_properties = 0
+    }
+
+    in_properties && index($0, "=") {
+        line = $0
+        sub(/=.*/, "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+
+        if (line == key) {
+            if (!property_written) {
+                print key " = " value
+                property_written = 1
+            }
+            next
+        }
+    }
+
+    {
+        print
+    }
+
+    END {
+        if (in_properties && !property_written) {
+            print key " = " value
+        } else if (!properties_found) {
+            print ""
+            print "[properties]"
+            print key " = " value
+        }
+    }
+    ' "$cfg" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if cmp -s "$cfg" "$tmp"; then
+        rm -f "$tmp"
+        echo "Property unchanged: $key = $value"
+        return 1
+    fi
+
+    if ! run_root chown "$owner:$group" "$tmp" ||
+       ! run_root chmod "$mode" "$tmp" ||
+       ! run_root mv -f "$tmp" "$cfg"; then
+        run_root rm -f "$tmp"
+        echo "ERROR: failed to update: $cfg" >&2
+        return 2
+    fi
+
+    echo "Property changed: $key = $value"
+    return 0
+}
+
+trap cleanup EXIT
+trap 'exit 0' INT TERM HUP
+
+if [ "$RUN_UID" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+    log "sudo is required when running as $(id -un)"
+    exit 1
+fi
+
+for command_name in sway swaymsg wayvnc dbus-daemon pulseaudio python3 ip socat; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        log "missing command: $command_name"
+        log "install packages: apk add sway wayvnc dbus pulseaudio python3 iproute2 socat"
+        exit 1
+    fi
+done
+
+log "stopping an earlier display/session instance"
+pkill -x wayvnc 2>/dev/null || true
+pkill -x sway 2>/dev/null || true
+pkill -x weston 2>/dev/null || true
+waydroid session stop >/dev/null 2>&1 || true
+run_root /etc/init.d/waydroid-container stop >/dev/null 2>&1 || true
+run_root rm -f /tmp/sway-waydroid.log /tmp/waydroid-session.log \
+    /tmp/waydroid-ui.log /tmp/wayvnc.log /tmp/waydroid-socat.log \
+    2>/dev/null || true
+run_root pkill -f "^socat TCP-LISTEN:${ADB_PORT}," 2>/dev/null || true
+run_root pkill -f "^/usr/bin/socat TCP-LISTEN:${ADB_PORT}," 2>/dev/null || true
+run_root pkill -f "^adb -L tcp:" 2>/dev/null || true
+
+log "updating Waydroid LXC config"
+if [ -e "${LXC_CONFIG}" ]; then
+	run_root sed -i 's/^lxc.hook.post-stop = \/dev\/null/# lxc.hook.post-stop = \/dev\/null/' ${LXC_CONFIG}
+fi
+if [ -e "${LXC_BASE_CONFIG}" ]; then
+	run_root sed -i 's/^lxc.hook.post-stop = \/dev\/null/# lxc.hook.post-stop = \/dev\/null/' ${LXC_BASE_CONFIG}
+fi
+
+log "updating Waydroid configuration"
+run_root sed -i 's/^auto_adb = .*/auto_adb = True/' "$WAYDROID_CFG"
+run_root sed -i 's/^suspend_action = .*/suspend_action = none/' "$WAYDROID_CFG"
+
+WAYDROID_CONFIG_CHANGED=0
+
+if set_waydroid_property persist.waydroid.suspend false; then
+    WAYDROID_CONFIG_CHANGED=1
+fi
+
+if set_waydroid_property ro.adb.secure 0; then
+    WAYDROID_CONFIG_CHANGED=1
+fi
+
+if set_waydroid_property fw.max_users 5; then
+    WAYDROID_CONFIG_CHANGED=1
+fi
+
+if set_waydroid_property fw.max_running_users 5; then
+    WAYDROID_CONFIG_CHANGED=1
+fi
+
+if set_waydroid_property fw.show_multiuserui 1; then
+    WAYDROID_CONFIG_CHANGED=1
+fi
+
+if [ "$WAYDROID_CONFIG_CHANGED" -eq 1 ]; then
+    run_root waydroid upgrade -o
+fi
+
+# waydroid prop set persist.waydroid.suspend false 로 변경
+## Waydroid 1.6.3 treats every value except "stop" as "freeze".  Add an
+## explicit "freeze" branch so suspend_action=none really performs no action.
+#run_root python3 - "$HARDWARE_MANAGER" <<'PY'
+#from pathlib import Path
+#import sys
+#
+#path = Path(sys.argv[1])
+#text = path.read_text()
+#old = '''        if cfg["waydroid"]["suspend_action"] == "stop":
+#            tools.actions.session_manager.stop(args)
+#        else:
+#            tools.actions.container_manager.freeze(args)
+#'''
+#new = '''        suspend_action = cfg["waydroid"]["suspend_action"]
+#        if suspend_action == "stop":
+#            tools.actions.session_manager.stop(args)
+#        elif suspend_action == "freeze":
+#            tools.actions.container_manager.freeze(args)
+#'''
+#
+#if old in text:
+#    path.write_text(text.replace(old, new, 1))
+#elif new in text:
+#    pass
+#elif 'elif suspend_action == "freeze":' in text:
+#    pass
+#elif 'elif cfg["waydroid"]["suspend_action"] == "freeze":' in text:
+#    pass
+#elif 'tools.actions.container_manager.freeze(args)' not in text:
+#    # The local file has already been modified so that suspend() cannot freeze.
+#    pass
+#else:
+#    raise SystemExit(f"unexpected suspend() implementation: {path}")
+#PY
+
+if run_root test -d "$RRO_SOURCE"; then
+    log "installing RRO APK files from $RRO_SOURCE"
+    run_root find "$RRO_SOURCE" -maxdepth 1 -type f -name '*.apk' | while IFS= read -r apk; do
+        overlay_name=${apk##*/}
+        overlay_name=${overlay_name%.apk}
+        destination=$RRO_TARGET/$overlay_name
+
+        run_root mkdir -p "$destination"
+        run_root cp -f "$apk" "$destination/$overlay_name.apk"
+        run_root chmod 755 "$destination"
+        run_root chmod 644 "$destination/$overlay_name.apk"
+        run_root chown -R root:root "$destination"
+        log "installed RRO: $overlay_name"
+    done
+fi
+
+run_root install -d -o "$RUN_UID" -g "$RUN_GID" -m 700 "$XDG_RUNTIME_DIR"
+
+# The previous compositor may leave socket pathnames behind after a forced stop.
+rm -f "$XDG_RUNTIME_DIR"/wayland-* \
+      "$XDG_RUNTIME_DIR"/sway-ipc.*.sock 2>/dev/null || true
+
+if [ ! -S "$XDG_RUNTIME_DIR/bus" ]; then
+    DBUS_PID=$(dbus-daemon \
+        --session \
+        --address="$DBUS_SESSION_BUS_ADDRESS" \
+        --fork \
+        --print-pid=1)
+fi
+
+if [ ! -S "$XDG_RUNTIME_DIR/bus" ]; then
+    log "failed to start dbus"
+    exit 1
+fi
+
+if [ ! -S "$XDG_RUNTIME_DIR/pulse/native" ]; then
+    pulseaudio --daemonize=yes --exit-idle-time=-1
+    PULSE_STARTED=1
+fi
+
+if [ ! -S "$XDG_RUNTIME_DIR/pulse/native" ]; then
+    log "failed to start pulseaudio"
+    exit 1
+fi
+
+cat >"$SWAY_CONFIG" <<'EOF'
+output * mode 1280x720
+output * bg #000000 solid_color
+
+seat * hide_cursor 3000
+focus_follows_mouse no
+mouse_warping none
+
+for_window [app_id="Waydroid"] fullscreen enable
+for_window [app_id="waydroid"] fullscreen enable
+for_window [title="Waydroid"] fullscreen enable
+EOF
+
+log "starting Sway headless compositor"
+sway \
+    --unsupported-gpu \
+    --config "$SWAY_CONFIG" \
+    > /tmp/sway-waydroid.log 2>&1 &
+SWAY_PID=$!
+
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+    wayland_socket=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s \
+        -name 'wayland-*' 2>/dev/null | head -n 1)
+    sway_socket=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s \
+        -name 'sway-ipc.*.sock' 2>/dev/null | head -n 1)
+
+    if [ -n "$wayland_socket" ] && [ -n "$sway_socket" ]; then
+        WAYLAND_DISPLAY=${wayland_socket##*/}
+        SWAYSOCK=$sway_socket
+        export WAYLAND_DISPLAY SWAYSOCK
+        break
+    fi
+
+    if ! is_running "$SWAY_PID"; then
+        log "Sway terminated during startup"
+        tail -n 100 /tmp/sway-waydroid.log 2>/dev/null || true
+        exit 1
+    fi
+
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+
+if [ -z "$SWAYSOCK" ]; then
+    log "Sway socket was not created"
+    tail -n 100 /tmp/sway-waydroid.log 2>/dev/null || true
+    exit 1
+fi
+
+output_name=$(swaymsg -s "$SWAYSOCK" -t get_outputs |
+    sed -n 's/^Output \([^ ]*\).*/\1/p' |
+    head -n 1)
+output_name=${output_name:-HEADLESS-1}
+
+swaymsg -s "$SWAYSOCK" output "$output_name" mode 1280x720 >/dev/null
+
+log "starting Waydroid container"
+run_root /etc/init.d/waydroid-container start
+
+log "starting Waydroid session on $WAYLAND_DISPLAY"
+waydroid session start > /tmp/waydroid-session.log 2>&1 &
+SESSION_PID=$!
+
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+    if waydroid status 2>/dev/null | grep -q 'Session:[[:space:]]*RUNNING'; then
+        break
+    fi
+
+    if ! is_running "$SESSION_PID"; then
+        log "Waydroid session terminated during startup"
+        tail -n 100 /tmp/waydroid-session.log 2>/dev/null || true
+        exit 1
+    fi
+
+    attempt=$((attempt + 1))
+    sleep 1
+done
+
+if ! waydroid status 2>/dev/null | grep -q 'Session:[[:space:]]*RUNNING'; then
+    log "Waydroid session did not become ready"
+    waydroid status 2>/dev/null || true
+    tail -n 100 /tmp/waydroid-session.log 2>/dev/null || true
+    exit 1
+fi
+
+if [ -z "$ADB_BIND" ]; then
+    ADB_BIND=$(ip -4 route get 1.1.1.1 2>/dev/null |
+        awk '{
+            for (i = 1; i <= NF; i++) {
+                if ($i == "src") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }')
+fi
+
+if [ -z "$ANDROID_IP" ]; then
+    log "waiting for the Waydroid IPv4 address"
+    attempt=0
+    while [ "$attempt" -lt 60 ]; do
+        ANDROID_IP=$(run_root waydroid shell ip -4 addr show dev eth0 2>/dev/null |
+            sed -n 's/^[[:space:]]*inet[[:space:]]\+\([0-9.]*\)\/.*/\1/p' |
+            head -n 1)
+
+        [ -n "$ANDROID_IP" ] && break
+
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+fi
+
+if [ -z "$ADB_BIND" ]; then
+    log "failed to detect the host IPv4 address; set ADB_BIND explicitly"
+    exit 1
+fi
+
+if [ -z "$ANDROID_IP" ]; then
+    log "failed to detect the Waydroid IPv4 address"
+    exit 1
+fi
+
+log "starting ADB forwarding: $ADB_BIND:$ADB_PORT -> $ANDROID_IP:$ADB_PORT"
+socat \
+    "TCP-LISTEN:${ADB_PORT},bind=${ADB_BIND},reuseaddr,fork" \
+    "TCP:${ANDROID_IP}:${ADB_PORT}" \
+    > /tmp/waydroid-socat.log 2>&1 &
+SOCAT_PID=$!
+
+sleep 1
+if ! is_running "$SOCAT_PID"; then
+    log "socat terminated during startup"
+    cat /tmp/waydroid-socat.log 2>/dev/null || true
+    exit 1
+fi
+
+waydroid show-full-ui > /tmp/waydroid-ui.log 2>&1 &
+UI_PID=$!
+
+log "starting VNC on $VNC_BIND:$VNC_PORT, output=$output_name, max-fps=$VNC_FPS"
+wayvnc \
+    --output="$output_name" \
+    --max-fps="$VNC_FPS" \
+    "$VNC_BIND" \
+    "$VNC_PORT" \
+    > /tmp/wayvnc.log 2>&1 &
+WAYVNC_PID=$!
+
+sleep 1
+if ! is_running "$WAYVNC_PID"; then
+    log "wayvnc terminated during startup"
+    cat /tmp/wayvnc.log 2>/dev/null || true
+    exit 1
+fi
+
+log "ready: vnc://$VNC_BIND:$VNC_PORT"
+log "ready: adb connect $ADB_BIND:$ADB_PORT"
+log "press Ctrl-C to stop everything started by this script"
+
+while is_running "$SWAY_PID" && \
+      is_running "$WAYVNC_PID" && \
+      is_running "$SOCAT_PID" && \
+      is_running "$SESSION_PID"; do
+    if container_is_running; then
+        CONTAINER_FAILURES=0
+    else
+        CONTAINER_FAILURES=$((CONTAINER_FAILURES + 1))
+        log "Waydroid container is not running ($CONTAINER_FAILURES/$CONTAINER_FAILURE_LIMIT)"
+
+        if [ "$CONTAINER_FAILURES" -ge "$CONTAINER_FAILURE_LIMIT" ]; then
+            log "Waydroid container remained stopped; requesting service restart"
+            exit 1
+        fi
+    fi
+
+    sleep 2
+done
+
+log "a required process exited"
+[ -f /tmp/sway-waydroid.log ] && tail -n 30 /tmp/sway-waydroid.log
+[ -f /tmp/wayvnc.log ] && tail -n 30 /tmp/wayvnc.log
+[ -f /tmp/waydroid-socat.log ] && tail -n 30 /tmp/waydroid-socat.log
+[ -f /tmp/waydroid-session.log ] && tail -n 30 /tmp/waydroid-session.log
+exit 1

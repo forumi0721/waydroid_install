@@ -1,0 +1,11 @@
+[Unit]
+Description=Prepare Waydroid configuration and overlays
+Before=waydroid-container.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/waydroid-prepare
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

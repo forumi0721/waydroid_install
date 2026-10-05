@@ -1,0 +1,13 @@
+[Unit]
+Description=Waydroid Headless Desktop
+After=dbus.socket pulseaudio.socket
+Wants=pulseaudio.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/waydroid-sway
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

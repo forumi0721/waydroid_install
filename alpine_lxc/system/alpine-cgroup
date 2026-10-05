@@ -1,0 +1,36 @@
+#!/sbin/openrc-run
+
+description="Prepare and delegate cgroup v2 controllers inside Alpine LXC"
+
+depend() {
+    need cgroups
+    before docker waydroid-container podman k3s containerd
+}
+
+start() {
+    ebegin "Preparing cgroup v2 subtree delegation"
+
+    local cg="/sys/fs/cgroup"
+    local leaf="$cg/init"
+
+    [ -f "$cg/cgroup.controllers" ] || {
+        eend 0 "cgroup v2 not available"
+        return 0
+    }
+
+    mkdir -p "$leaf"
+
+    # Move processes out of the root cgroup (cgroup v2 "no internal processes" rule)
+    for pid in $(cat "$cg/cgroup.procs" 2>/dev/null); do
+        echo "$pid" > "$leaf/cgroup.procs" 2>/dev/null || true
+    done
+
+    # Enable controllers for child cgroups
+    for ctrl in cpu io memory pids; do
+        if grep -qw "$ctrl" "$cg/cgroup.controllers"; then
+            echo "+$ctrl" > "$cg/cgroup.subtree_control" 2>/dev/null || true
+        fi
+    done
+
+    eend 0
+}

@@ -1,0 +1,212 @@
+#!/bin/bash
+set -u
+
+VNC_BIND=${VNC_BIND:-0.0.0.0}
+VNC_PORT=${VNC_PORT:-5900}
+VNC_FPS=${VNC_FPS:-15}
+ADB_PORT=${ADB_PORT:-5555}
+
+SWAY_PID=
+SESSION_PID=
+UI_PID=
+WAYVNC_PID=
+SOCAT_PID=
+SWAYSOCK=
+WAYLAND_DISPLAY=
+ANDROID_IP=
+
+export WLR_BACKENDS=headless
+export WLR_LIBINPUT_NO_DEVICES=1
+export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
+
+log()
+{
+    echo "[waydroid-sway] $*"
+}
+
+running()
+{
+    [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+cleanup()
+{
+    trap - EXIT INT TERM HUP
+
+    log "stopping"
+
+    running "$WAYVNC_PID" && kill "$WAYVNC_PID" 2>/dev/null
+    running "$SOCAT_PID" && kill "$SOCAT_PID" 2>/dev/null
+    running "$UI_PID" && kill "$UI_PID" 2>/dev/null
+
+    waydroid session stop >/dev/null 2>&1 || true
+
+    running "$SESSION_PID" && kill "$SESSION_PID" 2>/dev/null
+    running "$SWAY_PID" && kill "$SWAY_PID" 2>/dev/null
+
+    wait 2>/dev/null || true
+}
+
+trap cleanup EXIT
+trap 'exit 0' INT TERM HUP
+
+
+#
+# Sway
+#
+
+log "starting Sway"
+
+sway &
+SWAY_PID=$!
+
+for ((i=0; i<100; i++)); do
+    WAYLAND_SOCKET=$(
+        find "$XDG_RUNTIME_DIR" -maxdepth 1 \
+            -type s -name 'wayland-*' 2>/dev/null |
+        head -n1
+    )
+
+    SWAYSOCK=$(
+        find "$XDG_RUNTIME_DIR" -maxdepth 1 \
+            -type s -name 'sway-ipc.*.sock' 2>/dev/null |
+        head -n1
+    )
+
+    if [ -n "$WAYLAND_SOCKET" ] && [ -n "$SWAYSOCK" ]; then
+        WAYLAND_DISPLAY=${WAYLAND_SOCKET##*/}
+        export WAYLAND_DISPLAY SWAYSOCK
+        break
+    fi
+
+    running "$SWAY_PID" || exit 1
+    sleep .1
+done
+
+[ -n "$WAYLAND_DISPLAY" ] || {
+    log "Wayland socket not found"
+    exit 1
+}
+
+log "Wayland: $WAYLAND_DISPLAY"
+
+
+#
+# Waydroid session
+#
+
+log "starting Waydroid session"
+
+waydroid session start &
+SESSION_PID=$!
+
+for ((i=0; i<60; i++)); do
+    if waydroid status 2>/dev/null |
+        grep -q 'Session:[[:space:]]*RUNNING'; then
+        break
+    fi
+
+    running "$SESSION_PID" || exit 1
+    sleep 1
+done
+
+if ! waydroid status 2>/dev/null |
+    grep -q 'Session:[[:space:]]*RUNNING'; then
+
+    log "Waydroid session failed"
+    exit 1
+fi
+
+
+#
+# Full UI
+#
+
+log "starting Waydroid UI"
+
+waydroid show-full-ui &
+UI_PID=$!
+
+
+#
+# WayVNC
+#
+
+OUTPUT=$(
+    swaymsg -s "$SWAYSOCK" -t get_outputs |
+    sed -n 's/^Output \([^ ]*\).*/\1/p' |
+    head -n1
+)
+
+OUTPUT=${OUTPUT:-HEADLESS-1}
+
+log "starting VNC: ${VNC_BIND}:${VNC_PORT}"
+
+wayvnc \
+    --output="$OUTPUT" \
+    --max-fps="$VNC_FPS" \
+    "$VNC_BIND" "$VNC_PORT" &
+
+WAYVNC_PID=$!
+
+
+#
+# Android IP / ADB
+#
+
+HOST_IP=$(
+    ip -4 route get 1.1.1.1 |
+    awk '{
+        for (i=1; i<=NF; i++)
+            if ($i=="src") {
+                print $(i+1)
+                exit
+            }
+    }'
+)
+
+log "waiting for Android IPv4"
+
+for ((i=0; i<60; i++)); do
+    ANDROID_IP=$(
+        sudo -n /usr/bin/waydroid shell \
+            ip -4 addr show dev eth0 2>/dev/null |
+        sed -n \
+            's/^[[:space:]]*inet[[:space:]]\+\([0-9.]*\)\/.*/\1/p' |
+        head -n1
+    )
+
+    [ -n "$ANDROID_IP" ] && break
+    sleep 1
+done
+
+[ -n "$ANDROID_IP" ] || {
+    log "Android IPv4 not found"
+    exit 1
+}
+
+log "ADB: ${HOST_IP}:${ADB_PORT} -> ${ANDROID_IP}:${ADB_PORT}"
+
+socat \
+    "TCP-LISTEN:${ADB_PORT},bind=${HOST_IP},reuseaddr,fork" \
+    "TCP:${ANDROID_IP}:${ADB_PORT}" &
+
+SOCAT_PID=$!
+
+
+#
+# Ready / supervisor
+#
+
+log "ready"
+log "VNC: ${VNC_BIND}:${VNC_PORT}"
+log "ADB: ${HOST_IP}:${ADB_PORT}"
+
+while running "$SWAY_PID" &&
+      running "$WAYVNC_PID" &&
+      running "$SOCAT_PID"; do
+    sleep 2
+done
+
+log "required process exited"
+exit 1

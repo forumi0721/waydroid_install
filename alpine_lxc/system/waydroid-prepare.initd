@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+
+description="Prepare Waydroid configuration and overlays"
+
+depend() {
+    need localmount
+    after cgroups
+    before waydroid-container waydroid-sway
+}
+
+start() {
+    ebegin "Preparing Waydroid configuration and overlays"
+    /usr/local/sbin/waydroid-prepare
+    eend $?
+}

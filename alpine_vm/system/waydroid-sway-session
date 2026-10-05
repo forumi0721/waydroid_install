@@ -28,6 +28,7 @@ CONTAINER_FAILURES=0
 CONTAINER_FAILURE_LIMIT=${CONTAINER_FAILURE_LIMIT:-3}
 RUN_UID=$(id -u)
 RUN_GID=$(id -g)
+PRIV_CMD=
 
 export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY
 export WLR_BACKENDS=headless
@@ -46,7 +47,7 @@ run_root()
     if [ "$RUN_UID" -eq 0 ]; then
         "$@"
     else
-        sudo "$@"
+        "$PRIV_CMD" "$@"
     fi
 }
 
@@ -106,9 +107,15 @@ cleanup()
 trap cleanup EXIT
 trap 'exit 0' INT TERM HUP
 
-if [ "$RUN_UID" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
-    log "sudo is required when running as $(id -un)"
-    exit 1
+if [ "$RUN_UID" -ne 0 ]; then
+    if command -v doas >/dev/null 2>&1; then
+        PRIV_CMD=doas
+    elif command -v sudo >/dev/null 2>&1; then
+        PRIV_CMD=sudo
+    else
+        log "doas or sudo is required when running as $(id -un)"
+        exit 1
+    fi
 fi
 
 for command_name in sway swaymsg wayvnc dbus-daemon pulseaudio python3 ip socat; do

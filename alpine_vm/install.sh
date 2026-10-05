@@ -182,6 +182,13 @@ fi
 # ------------------------------------------------------------------------------
 log_info "Installing system binaries and OpenRC init scripts..."
 
+# 2-0. Waydroid kernel modules
+# Alpine VM owns its kernel. ext4 is required for Waydroid image mounts.
+install -d /etc/modules-load.d
+printf '%s\n' 'ext4' > /etc/modules-load.d/waydroid.conf
+modprobe ext4
+log_ok "Configured and loaded Waydroid kernel module: ext4"
+
 # 2-1. /usr/local/sbin/waydroid-prepare + OpenRC service
 install -d /usr/local/sbin
 install -m 755 "${SCRIPT_DIR}/system/waydroid-prepare" /usr/local/sbin/waydroid-prepare

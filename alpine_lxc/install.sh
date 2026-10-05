@@ -210,7 +210,7 @@ sed \
     -e "s|export LOGNAME=\".*\"|export LOGNAME=\"${TARGET_USER}\"|g" \
     -e "s|--owner [^ ]*|--owner ${TARGET_USER}:${TARGET_GROUP}|g" \
     -e "s|/run/user/[0-9]*|/run/user/${TARGET_UID}|g" \
-    "${SCRIPT_DIR}/system/waydroid-sway" > "$TMP_INIT"
+    "${SCRIPT_DIR}/system/waydroid-sway.initd" > "$TMP_INIT"
 
 install -m 755 "$TMP_INIT" /etc/init.d/waydroid-sway
 rm -f "$TMP_INIT"

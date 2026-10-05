@@ -62,6 +62,17 @@ container_is_running()
         grep -q 'Container:[[:space:]]*RUNNING'
 }
 
+start_waydroid_ui()
+{
+    if is_running "$UI_PID"; then
+        return 0
+    fi
+
+    log "starting Waydroid full UI on $WAYLAND_DISPLAY"
+    waydroid show-full-ui >> /tmp/waydroid-ui.log 2>&1 &
+    UI_PID=$!
+}
+
 cleanup()
 {
     [ "$CLEANING" -eq 0 ] || return 0
@@ -306,8 +317,8 @@ if ! is_running "$SOCAT_PID"; then
     exit 1
 fi
 
-waydroid show-full-ui > /tmp/waydroid-ui.log 2>&1 &
-UI_PID=$!
+: > /tmp/waydroid-ui.log
+start_waydroid_ui
 
 log "starting VNC on $VNC_BIND:$VNC_PORT, output=$output_name, max-fps=$VNC_FPS"
 wayvnc \
@@ -335,6 +346,15 @@ while is_running "$SWAY_PID" && \
       is_running "$SESSION_PID"; do
     if container_is_running; then
         CONTAINER_FAILURES=0
+
+        # Android reboot can destroy the Waydroid UI surface while the
+        # container, session, compositor and VNC server remain alive.  In that
+        # case show-full-ui exits, so recreate only the Android UI instead of
+        # restarting Sway/WayVNC and the whole Waydroid runtime.
+        if ! is_running "$UI_PID"; then
+            log "Waydroid UI exited; recreating full UI"
+            start_waydroid_ui
+        fi
     else
         CONTAINER_FAILURES=$((CONTAINER_FAILURES + 1))
         log "Waydroid container is not running ($CONTAINER_FAILURES/$CONTAINER_FAILURE_LIMIT)"

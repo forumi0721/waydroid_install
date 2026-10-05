@@ -214,16 +214,23 @@ log_ok "Installed /etc/init.d/waydroid-sway (configured for user: ${TARGET_USER}
 if [ "$ENABLE_SERVICE" -eq 1 ]; then
     if command -v rc-update >/dev/null 2>&1; then
         log_info "Adding services to default runlevel..."
+        rc-update add dbus default
         rc-update add waydroid-prepare default
         rc-update add waydroid-sway default
-        log_ok "Registered waydroid-prepare and waydroid-sway in default runlevel."
+        log_ok "Registered dbus, waydroid-prepare and waydroid-sway in default runlevel."
     else
         log_warn "rc-update not found. Skipping runlevel registration."
+    fi
+
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service dbus start
+        log_ok "Started D-Bus system service."
     fi
 fi
 
 printf "\n"
 log_ok "Alpine VM Waydroid installation completed successfully!"
 printf "You can start the service now using:\n"
+printf "  ${BLUE}rc-service dbus start${NC}\n"
 printf "  ${BLUE}rc-service waydroid-prepare start${NC}\n"
 printf "  ${BLUE}rc-service waydroid-sway start${NC}\n\n"

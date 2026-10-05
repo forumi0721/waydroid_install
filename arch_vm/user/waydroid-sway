@@ -14,6 +14,8 @@ SOCAT_PID=
 SWAYSOCK=
 WAYLAND_DISPLAY=
 ANDROID_IP=
+WAYDROID_FAILURES=0
+WAYDROID_FAILURE_LIMIT=${WAYDROID_FAILURE_LIMIT:-3}
 
 export WLR_BACKENDS=headless
 export WLR_LIBINPUT_NO_DEVICES=1
@@ -27,6 +29,18 @@ log()
 running()
 {
     [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+waydroid_is_running()
+{
+    local status
+
+    status=$(waydroid status 2>/dev/null) || return 1
+
+    printf '%s\n' "$status" |
+        grep -q 'Container:[[:space:]]*RUNNING' &&
+    printf '%s\n' "$status" |
+        grep -q 'Session:[[:space:]]*RUNNING'
 }
 
 cleanup()
@@ -205,6 +219,18 @@ log "ADB: ${HOST_IP}:${ADB_PORT}"
 while running "$SWAY_PID" &&
       running "$WAYVNC_PID" &&
       running "$SOCAT_PID"; do
+    if waydroid_is_running; then
+        WAYDROID_FAILURES=0
+    else
+        WAYDROID_FAILURES=$((WAYDROID_FAILURES + 1))
+        log "Waydroid container/session is not running ($WAYDROID_FAILURES/$WAYDROID_FAILURE_LIMIT)"
+
+        if [ "$WAYDROID_FAILURES" -ge "$WAYDROID_FAILURE_LIMIT" ]; then
+            log "Waydroid remained stopped; requesting service restart"
+            exit 1
+        fi
+    fi
+
     sleep 2
 done
 

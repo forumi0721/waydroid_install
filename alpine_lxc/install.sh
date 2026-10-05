@@ -190,6 +190,14 @@ install -d /etc/init.d
 install -m 755 "${SCRIPT_DIR}/system/alpine-cgroup" /etc/init.d/alpine-cgroup
 log_ok "Installed /etc/init.d/alpine-cgroup"
 
+# 2-1. Host kernel requirement
+# LXC shares the Proxmox host kernel, so kernel modules must be loaded on the host.
+if ! grep -qw ext4 /proc/filesystems; then
+    log_warn "ext4 filesystem support is not available in this LXC."
+    log_warn "Load it on the Proxmox host: modprobe ext4"
+    log_warn "For persistent loading on the host, add ext4 to /etc/modules."
+fi
+
 # 2-2. /usr/local/sbin/waydroid-prepare + OpenRC service
 install -d /usr/local/sbin
 install -m 755 "${SCRIPT_DIR}/system/waydroid-prepare" /usr/local/sbin/waydroid-prepare

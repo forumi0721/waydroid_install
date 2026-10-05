@@ -36,7 +36,7 @@ Usage: $(basename "$0") [OPTIONS]
 
 Options:
   -p, --install-pkgs        Install required packages listed in alpine_pkgs
-  -u, --user <USERNAME>     User to run waydroid sway session (default: forumi0721 or SUDO_USER)
+  -u, --user <USERNAME>     User to run waydroid sway session (default: DOAS_USER, SUDO_USER or forumi0721)
   --no-service              Install files only without adding to OpenRC default runlevel
   --uninstall               Remove installed files and unregister services
   -h, --help                Show this help message
@@ -122,7 +122,9 @@ fi
 # Determine Target User
 # ------------------------------------------------------------------------------
 if [ -z "$TARGET_USER" ]; then
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    if [ -n "${DOAS_USER:-}" ] && [ "$DOAS_USER" != "root" ]; then
+        TARGET_USER="$DOAS_USER"
+    elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
         TARGET_USER="$SUDO_USER"
     elif id forumi0721 >/dev/null 2>&1; then
         TARGET_USER="forumi0721"

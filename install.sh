@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Unified Waydroid Installer for Alpine LXC and Arch VM
+# Unified Waydroid Installer for Alpine LXC, Alpine VM and Arch VM
 # ==============================================================================
 set -euo pipefail
 
@@ -19,7 +19,9 @@ usage() {
 Usage: $(basename "$0") [TARGET] [OPTIONS]
 
 TARGET:
-  alpine        Install Waydroid components for Alpine LXC (OpenRC)
+  alpine-lxc    Install Waydroid components for Alpine LXC (OpenRC)
+  alpine-vm     Install Waydroid components for Alpine VM (OpenRC)
+  alpine        Alias for alpine-lxc (compatibility)
   arch          Install Waydroid components for Arch Linux VM (systemd)
   (If omitted, the target is automatically detected from /etc/os-release)
 
@@ -32,7 +34,8 @@ OPTIONS:
 Examples:
   sudo ./install.sh                        # Auto-detect OS and install
   sudo ./install.sh -p                     # Auto-detect OS, install packages & files
-  sudo ./install.sh alpine -p -u myuser    # Explicitly install on Alpine with packages
+  sudo ./install.sh alpine-vm -p -u myuser # Install on Alpine VM with packages
+  sudo ./install.sh alpine-lxc -p -u myuser # Install on Alpine LXC with packages
   sudo ./install.sh arch -p --enable-linger # Install on Arch with packages & linger
   sudo ./install.sh --uninstall            # Uninstall components
 EOF
@@ -45,7 +48,7 @@ detect_os() {
         . /etc/os-release
         case "${ID:-}" in
             alpine)
-                echo "alpine"
+                echo "alpine-lxc"
                 return 0
                 ;;
             arch|archarm|cachyos|endeavouros|manjaro|artix)
@@ -56,7 +59,7 @@ detect_os() {
                 # Check ID_LIKE
                 case "${ID_LIKE:-}" in
                     *alpine*)
-                        echo "alpine"
+                        echo "alpine-lxc"
                         return 0
                         ;;
                     *arch*)
@@ -76,8 +79,12 @@ FORWARD_ARGS=()
 # Parse first argument if it explicitly specifies the target
 if [ $# -gt 0 ]; then
     case "$1" in
-        alpine)
-            TARGET="alpine"
+        alpine|alpine-lxc)
+            TARGET="alpine-lxc"
+            shift
+            ;;
+        alpine-vm)
+            TARGET="alpine-vm"
             shift
             ;;
         arch)
@@ -107,7 +114,7 @@ if [ -z "$TARGET" ]; then
         printf "  q) Quit\n"
         read -r -p "Enter choice [1-2]: " choice
         case "$choice" in
-            1) TARGET="alpine" ;;
+            1) TARGET="alpine-lxc" ;;
             2) TARGET="arch" ;;
             *) echo "Cancelled."; exit 1 ;;
         esac
@@ -115,9 +122,13 @@ if [ -z "$TARGET" ]; then
 fi
 
 case "$TARGET" in
-    alpine)
+    alpine-lxc)
         printf "${GREEN}==> Launching Alpine LXC Installer...${NC}\n"
         exec "${SCRIPT_DIR}/alpine_lxc/install.sh" "${FORWARD_ARGS[@]}"
+        ;;
+    alpine-vm)
+        printf "${GREEN}==> Launching Alpine VM Installer...${NC}\n"
+        exec "${SCRIPT_DIR}/alpine_vm/install.sh" "${FORWARD_ARGS[@]}"
         ;;
     arch)
         printf "${GREEN}==> Launching Arch Linux VM Installer...${NC}\n"

@@ -1,10 +1,11 @@
-# Waydroid Headless Sway — Alpine LXC / Arch VM
+# Waydroid Headless Sway — Alpine LXC / Alpine VM / Arch VM
 
 Proxmox 환경에서 **Waydroid를 GUI 로그인 없이 Sway(headless) + WayVNC로 상시 구동**하기 위해 정리한 배포 저장소입니다.
 
-현재 저장소는 두 가지 실행 환경을 지원합니다.
+현재 저장소는 세 가지 실행 환경을 지원합니다.
 
-- **Alpine Linux LXC CT**: OpenRC 기반. LXC 안에서 Waydroid container와 사용자 세션을 함께 관리합니다.
+- **Alpine Linux LXC CT**: OpenRC 기반. Proxmox host의 kernel/cgroup을 공유하는 privileged/nested CT 구성입니다.
+- **Alpine Linux VM**: OpenRC 기반. VM이 자체 kernel/cgroup을 소유하며 Waydroid container와 headless session을 관리합니다.
 - **Arch Linux VM**: systemd 기반. root가 수행할 준비 작업과 일반 사용자 Wayland 세션을 명확히 분리합니다.
 
 두 환경 모두 최종적으로 다음 기능을 목표로 합니다.
@@ -33,7 +34,18 @@ way/
 │   ├── alpine_pkgs
 │   └── system/
 │       ├── alpine-cgroup
-│       ├── waydroid-sway
+│       ├── waydroid-prepare
+│       ├── waydroid-prepare.initd
+│       ├── waydroid-sway.initd
+│       └── waydroid-sway-session
+│
+├── alpine_vm/
+│   ├── install.sh
+│   ├── alpine_pkgs
+│   └── system/
+│       ├── waydroid-prepare
+│       ├── waydroid-prepare.initd
+│       ├── waydroid-sway.initd
 │       └── waydroid-sway-session
 │
 └── arch_vm/
@@ -53,14 +65,20 @@ way/
 
 | 환경 | Repository 파일 | 설치 위치 |
 |---|---|---|
-| Alpine | `alpine_lxc/system/alpine-cgroup` | `/etc/init.d/alpine-cgroup` |
-| Alpine | `alpine_lxc/system/waydroid-sway` | `/etc/init.d/waydroid-sway` |
-| Alpine | `alpine_lxc/system/waydroid-sway-session` | `/usr/local/bin/waydroid-sway-session` |
-| Arch | `arch_vm/system/waydroid-prepare` | `/usr/local/sbin/waydroid-prepare` |
-| Arch | `arch_vm/system/waydroid-prepare.service` | `/etc/systemd/system/waydroid-prepare.service` |
-| Arch | `arch_vm/system/waydroid-container.service.d/override.conf` | `/etc/systemd/system/waydroid-container.service.d/override.conf` |
-| Arch | `arch_vm/user/waydroid-sway` | `~/.local/bin/waydroid-sway` |
-| Arch | `arch_vm/user/waydroid-sway.service` | `~/.config/systemd/user/waydroid-sway.service` |
+| Alpine LXC | `alpine_lxc/system/alpine-cgroup` | `/etc/init.d/alpine-cgroup` |
+| Alpine LXC | `alpine_lxc/system/waydroid-prepare.initd` | `/etc/init.d/waydroid-prepare` |
+| Alpine LXC | `alpine_lxc/system/waydroid-prepare` | `/usr/local/sbin/waydroid-prepare` |
+| Alpine LXC | `alpine_lxc/system/waydroid-sway.initd` | `/etc/init.d/waydroid-sway` |
+| Alpine LXC | `alpine_lxc/system/waydroid-sway-session` | `/usr/local/bin/waydroid-sway-session` |
+| Alpine VM | `alpine_vm/system/waydroid-prepare.initd` | `/etc/init.d/waydroid-prepare` |
+| Alpine VM | `alpine_vm/system/waydroid-prepare` | `/usr/local/sbin/waydroid-prepare` |
+| Alpine VM | `alpine_vm/system/waydroid-sway.initd` | `/etc/init.d/waydroid-sway` |
+| Alpine VM | `alpine_vm/system/waydroid-sway-session` | `/usr/local/bin/waydroid-sway-session` |
+| Arch VM | `arch_vm/system/waydroid-prepare` | `/usr/local/sbin/waydroid-prepare` |
+| Arch VM | `arch_vm/system/waydroid-prepare.service` | `/etc/systemd/system/waydroid-prepare.service` |
+| Arch VM | `arch_vm/system/waydroid-container.service.d/override.conf` | `/etc/systemd/system/waydroid-container.service.d/override.conf` |
+| Arch VM | `arch_vm/user/waydroid-sway` | `~/.local/bin/waydroid-sway` |
+| Arch VM | `arch_vm/user/waydroid-sway.service` | `~/.config/systemd/user/waydroid-sway.service` |
 
 ---
 
@@ -68,28 +86,43 @@ way/
 
 ### Alpine LXC
 
-Alpine에서는 OpenRC 서비스 하나가 일반 사용자 세션에서 headless desktop과 Waydroid 실행 흐름을 관리합니다. Waydroid container 시작/정지처럼 root 권한이 필요한 작업만 `sudo`를 사용합니다.
+Alpine LXC는 Proxmox host의 kernel과 cgroup을 공유합니다. 따라서 CT 내부에서 해결할 수 없는 kernel 기능은 **PVE host에서 준비**해야 합니다.
 
 ```text
 OpenRC
-├── alpine-cgroup
-│   └── cgroup v2 subtree 준비
-│
-└── waydroid-sway                  [일반 사용자로 실행]
-    └── /usr/local/bin/waydroid-sway-session
-        ├── Waydroid 설정/property 준비
-        ├── RRO 배치
-        ├── D-Bus session
-        ├── PulseAudio
-        ├── Sway headless
-        ├── Waydroid container     [sudo/root]
-        ├── Waydroid session
-        ├── Waydroid full UI
-        ├── ADB socat forwarding
-        └── WayVNC
+└── alpine-cgroup                  [LXC 전용]
+    └── native cgroups 이후 subtree/controller 준비
+        └── waydroid-prepare
+            └── waydroid-sway     [일반 사용자]
+                └── waydroid-sway-session
+                    ├── D-Bus / PulseAudio
+                    ├── Sway headless
+                    ├── Waydroid container [doas/sudo]
+                    ├── Waydroid session/UI
+                    ├── ADB forwarding
+                    └── WayVNC
 ```
 
-OpenRC의 `supervise-daemon`이 `waydroid-sway-session`을 감시하며 비정상 종료 시 재시작합니다.
+`alpine-cgroup`은 **LXC에서만 사용**합니다. Binder, ext4, PSI 같은 kernel 기능은 PVE host kernel에서 제공되어야 합니다.
+
+### Alpine VM
+
+Alpine VM은 자체 kernel을 사용하므로 custom `alpine-cgroup`을 사용하지 않고 Alpine OpenRC의 native `cgroups` service를 사용합니다.
+
+```text
+OpenRC cgroups
+└── waydroid-prepare
+    └── waydroid-sway
+        └── waydroid-sway-session
+            ├── D-Bus / PulseAudio
+            ├── Sway headless
+            ├── Waydroid container [doas/sudo]
+            ├── Waydroid session/UI
+            ├── ADB forwarding
+            └── WayVNC
+```
+
+VM에서는 kernel이 Binder/BinderFS와 ext4를 제공해야 하며, PSI가 default-disabled인 kernel은 boot parameter `psi=1`이 필요합니다. Installer는 ext4 autoload와 GRUB의 `psi=1` 설정을 처리합니다.
 
 ### Arch VM
 
@@ -150,6 +183,67 @@ fw.show_multiuserui = 1
 
 ---
 
+## VM kernel / boot requirements
+
+Waydroid의 Android userspace는 Binder뿐 아니라 ext4와 memory pressure 처리를 위한 PSI에도 의존합니다.
+
+### PSI
+
+특히 kernel이 다음과 같이 빌드된 경우:
+
+```text
+CONFIG_PSI=y
+CONFIG_PSI_DEFAULT_DISABLED=y
+```
+
+기능은 존재하지만 boot parameter가 없으면 `/proc/pressure`가 생성되지 않습니다. 이 상태에서는 Android `lmkd`가 다음과 같이 종료될 수 있습니다.
+
+```text
+libpsi: No kernel psi monitor support
+lowmemorykiller: Kernel does not support memory pressure events
+lowmemorykiller: exiting
+```
+
+VM에서는 kernel command line에 다음이 필요합니다.
+
+```text
+psi=1
+```
+
+확인:
+
+```bash
+cat /proc/cmdline
+cat /proc/pressure/memory
+```
+
+Alpine VM/Arch VM installer는 GRUB을 사용하는 경우 `psi=1`을 중복 없이 추가하고 `grub-mkconfig`를 실행합니다. 적용에는 reboot가 필요합니다. **Alpine LXC에서는 installer가 host kernel command line을 변경하지 않습니다.** Proxmox host에서 직접 `psi=1`을 설정합니다.
+
+### ext4
+
+Waydroid image mount에 ext4가 필요합니다.
+
+- Alpine VM: installer가 `/etc/modules-load.d/waydroid.conf`에 `ext4`를 등록하고 즉시 `modprobe ext4`를 수행합니다.
+- Alpine LXC: kernel module을 CT가 소유하지 않으므로 Proxmox host에서 `modprobe ext4`가 되어 있어야 합니다.
+
+### system D-Bus
+
+`waydroid container start`는 system D-Bus가 없으면 다음 계열 오류로 실패합니다.
+
+```text
+org.freedesktop.DBus.Error.FileNotFound
+Failed to connect to socket /run/dbus/system_bus_socket
+```
+
+Alpine installer는 `dbus`를 default runlevel에 등록하고 system bus를 시작합니다. 확인:
+
+```bash
+rc-service dbus status
+test -S /run/dbus/system_bus_socket && echo OK
+```
+
+---
+
 # Alpine Linux LXC
 
 ## 4. Alpine 전제 조건
@@ -179,7 +273,7 @@ sudo ./install.sh alpine -p
 Repository root에서:
 
 ```bash
-sudo ./install.sh alpine -u forumi0721
+sudo ./install.sh alpine-lxc -u forumi0721
 ```
 
 Alpine에서 실행하면 OS 자동 감지도 가능합니다.
@@ -208,13 +302,13 @@ waydroid-sway
 서비스 등록 없이 파일만 설치하려면:
 
 ```bash
-sudo ./install.sh alpine --no-service -u forumi0721
+sudo ./install.sh alpine-lxc --no-service -u forumi0721
 ```
 
 삭제:
 
 ```bash
-sudo ./install.sh alpine --uninstall
+sudo ./install.sh alpine-lxc --uninstall
 ```
 
 ---
@@ -956,6 +1050,39 @@ sudo lxc-unfreeze -P /var/lib/waydroid/lxc -n waydroid
 
 ## 25. Troubleshooting
 
+### Waydroid가 Android boot 도중 10~20초 후 종료
+
+먼저 network cleanup이나 `lxc.hook.post-stop`만 보고 원인으로 판단하지 않습니다. container가 먼저 죽으면 `waydroid-net.sh stop`은 정상적인 후처리로 실행됩니다.
+
+Android log에서 다음 패턴을 확인합니다.
+
+```text
+No kernel psi monitor support
+No kernel memory.pressure_level support
+Kernel does not support memory pressure events
+lowmemorykiller: exiting
+```
+
+VM이면:
+
+```bash
+zcat /proc/config.gz | grep -E 'CONFIG_PSI|CONFIG_MEMCG|CONFIG_CGROUPS'
+cat /proc/cmdline
+ls -l /proc/pressure
+cat /proc/pressure/memory
+```
+
+`CONFIG_PSI=y`이면서 `CONFIG_PSI_DEFAULT_DISABLED=y`라면 `psi=1`이 필요합니다.
+
+또한 Waydroid LXC 기본 설정의 다음 항목:
+
+```text
+lxc.mount.auto = cgroup:ro sys:ro proc
+```
+
+자체는 이번 Alpine VM 장애의 원인이 아니었습니다. Android의 `/sys/fs/cgroup/uid_*` read-only 메시지만 보고 `cgroup:rw`로 변경하는 것을 해결책으로 사용하지 않습니다. 실제 원인은 PSI 비활성 상태에서 LMKD가 memory pressure backend를 확보하지 못한 것이었습니다.
+
+
 ### `Cannot add more profiles of type ... CLONE`
 
 ```bash
@@ -1038,6 +1165,7 @@ waydroid status
 ```text
 install.sh
 alpine_lxc/
+alpine_vm/
 arch_vm/
 README.md
 ```
@@ -1081,7 +1209,9 @@ Waydroid 전체 state는 `/var/lib/waydroid` 아래에 있으므로 단순 servi
 Usage: ./install.sh [TARGET] [OPTIONS]
 
 TARGET
-  alpine
+  alpine-lxc
+  alpine-vm
+  alpine        # Alpine에서 LXC/VM 자동 감지
   arch
 
 COMMON
@@ -1096,7 +1226,8 @@ TARGET을 생략하면 `/etc/os-release`로 자동 감지합니다.
 ```bash
 sudo ./install.sh
 sudo ./install.sh -u forumi0721
-sudo ./install.sh alpine -u forumi0721
+sudo ./install.sh alpine-lxc -u forumi0721
+sudo ./install.sh alpine-vm -u forumi0721
 sudo ./install.sh arch -u forumi0721 --enable-linger
 ```
 
@@ -1141,6 +1272,19 @@ user:
 
 RRO source: /var/lib/waydroid/rro
 RRO target: /var/lib/waydroid/overlay/system/product/overlay
+VNC: :5900
+ADB: host :5555 -> Android :5555
+```
+
+## Alpine VM
+
+```text
+OpenRC native cgroups
+waydroid-prepare -> waydroid-sway
+Kernel: Binder/BinderFS + ext4 + PSI
+PSI: psi=1 when CONFIG_PSI_DEFAULT_DISABLED=y
+RRO source: /var/lib/waydroid/rro
+Sway: headless + pixman
 VNC: :5900
 ADB: host :5555 -> Android :5555
 ```

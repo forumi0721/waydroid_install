@@ -1,0 +1,156 @@
+#!/bin/bash
+set -euo pipefail
+
+CFG=/var/lib/waydroid/waydroid.cfg
+RRO_SOURCE=/var/lib/waydroid/rro
+RRO_TARGET=/var/lib/waydroid/overlay/system/product/overlay
+
+CHANGED=0
+
+log()
+{
+    echo "[waydroid-prepare] $*"
+}
+
+#
+# waydroid.cfg 일반 설정
+#
+
+set_config()
+{
+    local key="$1"
+    local value="$2"
+
+    if grep -q "^${key}[[:space:]]*=" "$CFG"; then
+        if grep -q "^${key}[[:space:]]*=[[:space:]]*${value}[[:space:]]*$" "$CFG"; then
+            return
+        fi
+
+        sed -i \
+            "s|^${key}[[:space:]]*=.*|${key} = ${value}|" \
+            "$CFG"
+    else
+        # 일반 설정은 보통 [waydroid]에 이미 존재하므로
+        # 없는 경우는 실패시켜 구조 변경을 발견하도록 함
+        log "WARNING: config key not found: $key"
+        return
+    fi
+
+    log "config: $key = $value"
+    CHANGED=1
+}
+
+#
+# [properties] 설정
+#
+
+set_property()
+{
+    local key="$1"
+    local value="$2"
+    local rc=0
+
+    python3 - "$CFG" "$key" "$value" <<'PY' || rc=$?
+import configparser
+import sys
+
+path, key, value = sys.argv[1:]
+
+cfg = configparser.ConfigParser(strict=False)
+cfg.optionxform = str
+cfg.read(path)
+
+if not cfg.has_section("properties"):
+    cfg.add_section("properties")
+
+if cfg.get("properties", key, fallback=None) == value:
+    sys.exit(1)
+
+cfg.set("properties", key, value)
+
+with open(path, "w") as f:
+    cfg.write(f, space_around_delimiters=True)
+PY
+
+    case "$rc" in
+        0)
+            log "property: $key = $value"
+            CHANGED=1
+            ;;
+        1)
+            ;;
+        *)
+            log "ERROR: failed to set property: $key"
+            return "$rc"
+            ;;
+    esac
+}
+
+#
+# RRO
+#
+
+install_rro()
+{
+    [ -d "$RRO_SOURCE" ] || {
+        log "RRO source not found; skipping"
+        return
+    }
+
+    for apk in "$RRO_SOURCE"/*.apk; do
+        [ -f "$apk" ] || continue
+
+        local name
+        local dst
+
+        name=$(basename "$apk" .apk)
+        dst="$RRO_TARGET/$name"
+
+        install -d -o root -g root -m 755 "$dst"
+
+        if [ ! -f "$dst/$name.apk" ] ||
+           ! cmp -s "$apk" "$dst/$name.apk"; then
+
+            install -o root -g root -m 644 \
+                "$apk" "$dst/$name.apk"
+
+            log "RRO installed: $name"
+            CHANGED=1
+        else
+            log "RRO unchanged: $name"
+        fi
+    done
+}
+
+
+#
+# Main
+#
+
+[ -f "$CFG" ] || {
+    log "ERROR: $CFG does not exist"
+    exit 1
+}
+
+log "preparing Waydroid"
+
+set_config auto_adb True
+set_config suspend_action none
+
+set_property persist.waydroid.suspend false
+set_property ro.adb.secure 0
+
+set_property fw.max_users 5
+set_property fw.max_running_users 5
+set_property fw.show_multiuserui 1
+
+install_rro
+
+if [ "$CHANGED" -eq 1 ]; then
+    log "configuration changed; applying overlay/config"
+    waydroid upgrade -o
+else
+    log "configuration unchanged"
+fi
+
+log "done"

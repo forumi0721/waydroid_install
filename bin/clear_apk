@@ -1,0 +1,32 @@
+#!/bin/sh
+
+users="$(adb shell pm list users | grep UserInfo | sed -e 's/^.*UserInfo{\([0-9]*\):.*$/\1/g')"
+echo "Users : ${users}"
+
+cmd="echo "
+
+exec() {
+	for user in ${users}
+	do
+		cmd="${cmd}; pm disable-user --user ${user} ${1}; am force-stop --user ${user} ${1}; pm clear --user ${user} ${1}"
+	done
+}
+
+exec org.lineageos.recorder
+exec org.lineageos.eleven
+exec org.lineageos.etar
+exec com.google.android.apps.restore
+exec com.google.android.apps.messaging
+exec org.lineageos.aperture
+exec com.google.android.contacts
+#exec com.android.nfc
+exec com.android.calculator2
+exec org.lineageos.jelly
+exec com.google.android.googlequicksearchbox
+exec com.google.android.projection.gearhead
+#exec com.google.android.gms.supervision
+exec com.android.deskclock
+
+echo "CMD : ${cmd}"
+
+adb shell sh -c "${cmd}"

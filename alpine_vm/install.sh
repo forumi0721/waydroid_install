@@ -1,6 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# Alpine LXC Waydroid Installer
+# Alpine VM Waydroid Installer
 # ==============================================================================
 set -eu
 
@@ -42,8 +42,7 @@ Options:
   -h, --help                Show this help message
 
 Description:
-  Installs Waydroid headless sway session and cgroup helper for Alpine LXC:
-    - /etc/init.d/alpine-cgroup             (LXC cgroup helper)
+  Installs Waydroid headless sway session and cgroup helper for Alpine VM:
     - /etc/init.d/waydroid-prepare           (OpenRC init script)
     - /usr/local/sbin/waydroid-prepare       (Waydroid config/RRO preparation)
     - /etc/init.d/waydroid-sway              (OpenRC init script)
@@ -108,10 +107,8 @@ if [ "$UNINSTALL" -eq 1 ]; then
     if command -v rc-update >/dev/null 2>&1; then
         rc-update del waydroid-sway default 2>/dev/null || true
         rc-update del waydroid-prepare default 2>/dev/null || true
-        rc-update del alpine-cgroup default 2>/dev/null || true
     fi
 
-    rm -f /etc/init.d/alpine-cgroup
     rm -f /etc/init.d/waydroid-prepare
     rm -f /usr/local/sbin/waydroid-prepare
     rm -f /etc/init.d/waydroid-sway
@@ -180,36 +177,68 @@ if [ "$INSTALL_PKGS" -eq 1 ]; then
     fi
 fi
 
+
+ensure_psi_enabled() {
+    if grep -qw 'psi=1' /proc/cmdline 2>/dev/null; then
+        log_ok "Kernel PSI is already enabled."
+        return 0
+    fi
+
+    if [ ! -f /etc/default/grub ]; then
+        log_warn "Kernel PSI is not enabled and /etc/default/grub was not found."
+        log_warn "Add 'psi=1' to the VM kernel command line manually."
+        return 0
+    fi
+
+    if grep -Eq '^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=.*(^|[[:space:]])psi=1([[:space:]]|")' /etc/default/grub; then
+        log_ok "Kernel PSI boot option is already configured; reboot is required."
+        return 0
+    fi
+
+    if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
+        sed -i -E 's/^(GRUB_CMDLINE_LINUX_DEFAULT=")(.*)"/\1\2 psi=1"/' /etc/default/grub
+    else
+        printf '%s\n' 'GRUB_CMDLINE_LINUX_DEFAULT="psi=1"' >> /etc/default/grub
+    fi
+
+    if command -v grub-mkconfig >/dev/null 2>&1; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+        log_ok "Configured kernel PSI boot option: psi=1"
+        log_warn "Reboot is required before Waydroid can use PSI."
+    else
+        log_warn "Added psi=1 to /etc/default/grub, but grub-mkconfig was not found."
+        log_warn "Regenerate the bootloader configuration manually before rebooting."
+    fi
+}
+
 # ------------------------------------------------------------------------------
 # 2. Install Files
 # ------------------------------------------------------------------------------
 log_info "Installing system binaries and OpenRC init scripts..."
 
-# 2-1. /etc/init.d/alpine-cgroup
-install -d /etc/init.d
-install -m 755 "${SCRIPT_DIR}/system/alpine-cgroup" /etc/init.d/alpine-cgroup
-log_ok "Installed /etc/init.d/alpine-cgroup"
+# Waydroid LMKD requires PSI. Alpine linux-stable may build PSI with
+# CONFIG_PSI_DEFAULT_DISABLED=y, so VM kernels need psi=1 on the command line.
+ensure_psi_enabled
 
-# 2-1. Host kernel requirement
-# LXC shares the Proxmox host kernel, so kernel modules must be loaded on the host.
-if ! grep -qw ext4 /proc/filesystems; then
-    log_warn "ext4 filesystem support is not available in this LXC."
-    log_warn "Load it on the Proxmox host: modprobe ext4"
-    log_warn "For persistent loading on the host, add ext4 to /etc/modules."
-fi
+# 2-0. Waydroid kernel modules
+# Alpine VM owns its kernel. ext4 is required for Waydroid image mounts.
+install -d /etc/modules-load.d
+printf '%s\n' 'ext4' > /etc/modules-load.d/waydroid.conf
+modprobe ext4
+log_ok "Configured and loaded Waydroid kernel module: ext4"
 
-# 2-2. /usr/local/sbin/waydroid-prepare + OpenRC service
+# 2-1. /usr/local/sbin/waydroid-prepare + OpenRC service
 install -d /usr/local/sbin
 install -m 755 "${SCRIPT_DIR}/system/waydroid-prepare" /usr/local/sbin/waydroid-prepare
 install -m 755 "${SCRIPT_DIR}/system/waydroid-prepare.initd" /etc/init.d/waydroid-prepare
 log_ok "Installed Waydroid prepare service"
 
-# 2-3. /usr/local/bin/waydroid-sway-session
+# 2-2. /usr/local/bin/waydroid-sway-session
 install -d /usr/local/bin
 install -m 755 "${SCRIPT_DIR}/system/waydroid-sway-session" /usr/local/bin/waydroid-sway-session
 log_ok "Installed /usr/local/bin/waydroid-sway-session"
 
-# 2-4. /etc/init.d/waydroid-sway (with user template substitution)
+# 2-3. /etc/init.d/waydroid-sway (with user template substitution)
 TMP_INIT=$(mktemp)
 sed \
     -e "s|command_user=\".*\"|command_user=\"${TARGET_USER}:${TARGET_GROUP}\"|g" \
@@ -231,10 +260,9 @@ if [ "$ENABLE_SERVICE" -eq 1 ]; then
     if command -v rc-update >/dev/null 2>&1; then
         log_info "Adding services to default runlevel..."
         rc-update add dbus default
-        rc-update add alpine-cgroup default
         rc-update add waydroid-prepare default
         rc-update add waydroid-sway default
-        log_ok "Registered dbus, alpine-cgroup, waydroid-prepare and waydroid-sway in default runlevel."
+        log_ok "Registered dbus, waydroid-prepare and waydroid-sway in default runlevel."
     else
         log_warn "rc-update not found. Skipping runlevel registration."
     fi
@@ -246,9 +274,8 @@ if [ "$ENABLE_SERVICE" -eq 1 ]; then
 fi
 
 printf "\n"
-log_ok "Alpine LXC Waydroid installation completed successfully!"
+log_ok "Alpine VM Waydroid installation completed successfully!"
 printf "You can start the service now using:\n"
 printf "  ${BLUE}rc-service dbus start${NC}\n"
-printf "  ${BLUE}rc-service alpine-cgroup start${NC}\n"
 printf "  ${BLUE}rc-service waydroid-prepare start${NC}\n"
 printf "  ${BLUE}rc-service waydroid-sway start${NC}\n\n"

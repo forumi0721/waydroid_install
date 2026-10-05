@@ -14,6 +14,7 @@ SOCAT_PID=
 SWAYSOCK=
 WAYLAND_DISPLAY=
 ANDROID_IP=
+PRIV_CMD=
 WAYDROID_FAILURES=0
 WAYDROID_FAILURE_LIMIT=${WAYDROID_FAILURE_LIMIT:-3}
 
@@ -30,6 +31,15 @@ running()
 {
     [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
 }
+
+if command -v doas >/dev/null 2>&1; then
+    PRIV_CMD="doas -n"
+elif command -v sudo >/dev/null 2>&1; then
+    PRIV_CMD="sudo -n"
+else
+    log "doas or sudo is required"
+    exit 1
+fi
 
 waydroid_is_running()
 {
@@ -183,7 +193,7 @@ log "waiting for Android IPv4"
 
 for ((i=0; i<60; i++)); do
     ANDROID_IP=$(
-        sudo -n /usr/bin/waydroid shell \
+        $PRIV_CMD /usr/bin/waydroid shell \
             ip -4 addr show dev eth0 2>/dev/null |
         sed -n \
             's/^[[:space:]]*inet[[:space:]]\+\([0-9.]*\)\/.*/\1/p' |

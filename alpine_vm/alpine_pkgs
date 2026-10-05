@@ -1,12 +1,7 @@
 alpine-base
-alpine-baselayout
-alpine-keys
-alpine-release
 android-build-tools
 android-tools-adb
-apk-tools
 bash
-busybox
 curl
 dbus
 doas

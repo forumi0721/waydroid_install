@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Unified Waydroid Installer for Alpine LXC and Arch VM
+# Unified Waydroid Installer for Alpine LXC, Alpine VM and Arch VM
 # ==============================================================================
 set -euo pipefail
 
@@ -19,9 +19,11 @@ usage() {
 Usage: $(basename "$0") [TARGET] [OPTIONS]
 
 TARGET:
-  alpine        Install Waydroid components for Alpine LXC (OpenRC)
+  alpine-lxc    Install Waydroid components for Alpine LXC (OpenRC)
+  alpine-vm     Install Waydroid components for Alpine VM (OpenRC)
+  alpine        Auto-detect Alpine LXC or VM
   arch          Install Waydroid components for Arch Linux VM (systemd)
-  (If omitted, the target is automatically detected from /etc/os-release)
+  (If omitted, OS and Alpine LXC/VM environment are automatically detected)
 
 OPTIONS:
   -p, --install-pkgs    Install required packages (apk / pacman + AUR)
@@ -32,11 +34,23 @@ OPTIONS:
 Examples:
   sudo ./install.sh                        # Auto-detect OS and install
   sudo ./install.sh -p                     # Auto-detect OS, install packages & files
-  sudo ./install.sh alpine -p -u myuser    # Explicitly install on Alpine with packages
+  sudo ./install.sh alpine-vm -p -u myuser # Install on Alpine VM with packages
+  sudo ./install.sh alpine-lxc -p -u myuser # Install on Alpine LXC with packages
   sudo ./install.sh arch -p --enable-linger # Install on Arch with packages & linger
   sudo ./install.sh --uninstall            # Uninstall components
 EOF
     exit 0
+}
+
+detect_alpine_target() {
+    # systemd-detect-virt is not guaranteed on Alpine, so prefer cgroup/env markers.
+    if grep -qaE '(^|/)(lxc|lxc\.payload)(/|$)' /proc/1/cgroup 2>/dev/null ||
+       [ -n "${container:-}" ] && [ "${container:-}" = "lxc" ] ||
+       [ -e /run/.containerenv ] && grep -qi lxc /run/.containerenv 2>/dev/null; then
+        echo "alpine-lxc"
+    else
+        echo "alpine-vm"
+    fi
 }
 
 detect_os() {
@@ -45,7 +59,7 @@ detect_os() {
         . /etc/os-release
         case "${ID:-}" in
             alpine)
-                echo "alpine"
+                detect_alpine_target
                 return 0
                 ;;
             arch|archarm|cachyos|endeavouros|manjaro|artix)
@@ -56,7 +70,7 @@ detect_os() {
                 # Check ID_LIKE
                 case "${ID_LIKE:-}" in
                     *alpine*)
-                        echo "alpine"
+                        detect_alpine_target
                         return 0
                         ;;
                     *arch*)
@@ -73,11 +87,32 @@ detect_os() {
 TARGET=""
 FORWARD_ARGS=()
 
+if [ "$(id -u)" -ne 0 ]; then
+    printf "${RED}[ERROR] This installer requires root privileges.${NC}\n" >&2
+    if command -v doas >/dev/null 2>&1; then
+        printf "Run: ${BLUE}doas %s" "$0" >&2
+    elif command -v sudo >/dev/null 2>&1; then
+        printf "Run: ${BLUE}sudo %s" "$0" >&2
+    else
+        printf "Re-run this installer as root: ${BLUE}%s" "$0" >&2
+    fi
+    printf " %s${NC}\n" "$*" >&2
+    exit 1
+fi
+
 # Parse first argument if it explicitly specifies the target
 if [ $# -gt 0 ]; then
     case "$1" in
         alpine)
-            TARGET="alpine"
+            TARGET="$(detect_alpine_target)"
+            shift
+            ;;
+        alpine-lxc)
+            TARGET="alpine-lxc"
+            shift
+            ;;
+        alpine-vm)
+            TARGET="alpine-vm"
             shift
             ;;
         arch)
@@ -103,21 +138,27 @@ if [ -z "$TARGET" ]; then
         printf "${YELLOW}[WARN] Could not automatically determine target environment from /etc/os-release.${NC}\n"
         printf "Please select target:\n"
         printf "  1) Alpine LXC (OpenRC)\n"
-        printf "  2) Arch Linux VM (systemd)\n"
+        printf "  2) Alpine VM (OpenRC)\n"
+        printf "  3) Arch Linux VM (systemd)\n"
         printf "  q) Quit\n"
-        read -r -p "Enter choice [1-2]: " choice
+        read -r -p "Enter choice [1-3]: " choice
         case "$choice" in
-            1) TARGET="alpine" ;;
-            2) TARGET="arch" ;;
+            1) TARGET="alpine-lxc" ;;
+            2) TARGET="alpine-vm" ;;
+            3) TARGET="arch" ;;
             *) echo "Cancelled."; exit 1 ;;
         esac
     fi
 fi
 
 case "$TARGET" in
-    alpine)
+    alpine-lxc)
         printf "${GREEN}==> Launching Alpine LXC Installer...${NC}\n"
         exec "${SCRIPT_DIR}/alpine_lxc/install.sh" "${FORWARD_ARGS[@]}"
+        ;;
+    alpine-vm)
+        printf "${GREEN}==> Launching Alpine VM Installer...${NC}\n"
+        exec "${SCRIPT_DIR}/alpine_vm/install.sh" "${FORWARD_ARGS[@]}"
         ;;
     arch)
         printf "${GREEN}==> Launching Arch Linux VM Installer...${NC}\n"

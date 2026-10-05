@@ -36,7 +36,7 @@ Usage: $(basename "$0") [OPTIONS]
 
 Options:
   -p, --install-pkgs        Install packages listed in arch_packages (pacman + AUR helper)
-  -u, --user <USERNAME>     Target user for user-level service and script (default: SUDO_USER or current user)
+  -u, --user <USERNAME>     Target user for user-level service and script (default: DOAS_USER, SUDO_USER or current user)
   --system-only             Install only system-level files and services (/etc, /usr/local/sbin)
   --user-only               Install only user-level files and services (~/.config, ~/.local/bin)
   --enable-linger           Enable loginctl linger for the user (runs user services without active login)
@@ -112,7 +112,9 @@ done
 # Determine Target User & Home
 # ------------------------------------------------------------------------------
 if [ -z "$TARGET_USER" ]; then
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    if [ -n "${DOAS_USER:-}" ] && [ "$DOAS_USER" != "root" ]; then
+        TARGET_USER="$DOAS_USER"
+    elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
         TARGET_USER="$SUDO_USER"
     elif [ "$(id -u)" -ne 0 ]; then
         TARGET_USER="$(id -un)"
@@ -179,7 +181,7 @@ fi
 # Check Privileges
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_SYSTEM" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
-    log_err "System files installation requires root privileges. Please run with sudo."
+    log_err "System files installation requires root privileges. Please run with sudo or doas."
     exit 1
 fi
 
@@ -246,11 +248,49 @@ if [ "$INSTALL_PKGS" -eq 1 ]; then
     fi
 fi
 
+
+ensure_psi_enabled() {
+    if grep -qw 'psi=1' /proc/cmdline 2>/dev/null; then
+        log_ok "Kernel PSI is already enabled."
+        return 0
+    fi
+
+    if [ ! -f /etc/default/grub ]; then
+        log_warn "Kernel PSI is not enabled and /etc/default/grub was not found."
+        log_warn "Add 'psi=1' to the VM kernel command line manually."
+        return 0
+    fi
+
+    if grep -Eq '^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=.*(^|[[:space:]])psi=1([[:space:]]|")' /etc/default/grub; then
+        log_ok "Kernel PSI boot option is already configured; reboot is required."
+        return 0
+    fi
+
+    if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
+        sed -i -E 's/^(GRUB_CMDLINE_LINUX_DEFAULT=")(.*)"/\1\2 psi=1"/' /etc/default/grub
+    else
+        printf '%s\n' 'GRUB_CMDLINE_LINUX_DEFAULT="psi=1"' >> /etc/default/grub
+    fi
+
+    if command -v grub-mkconfig >/dev/null 2>&1; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+        log_ok "Configured kernel PSI boot option: psi=1"
+        log_warn "Reboot is required before Waydroid can use PSI."
+    else
+        log_warn "Added psi=1 to /etc/default/grub, but grub-mkconfig was not found."
+        log_warn "Regenerate the bootloader configuration manually before rebooting."
+    fi
+}
+
 # ------------------------------------------------------------------------------
 # 2. Install System Components
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_SYSTEM" -eq 1 ]; then
     log_info "Installing system components..."
+
+    # Waydroid LMKD requires PSI. Enable it explicitly for VM kernels that
+    # build CONFIG_PSI_DEFAULT_DISABLED=y.
+    ensure_psi_enabled
 
     # 2-1. /usr/local/sbin/waydroid-prepare
     install -d /usr/local/sbin
@@ -339,5 +379,5 @@ printf "\n"
 log_ok "Arch Linux Waydroid installation completed successfully!"
 if [ "$ENABLE_LINGER" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
     printf "\n${YELLOW}[TIP]${NC} To keep the headless Sway session running without logging in:\n"
-    printf "  ${BLUE}sudo loginctl enable-linger %s${NC}\n\n" "$TARGET_USER"
+    printf "  ${BLUE}doas loginctl enable-linger %s${NC}  # or sudo\n\n" "$TARGET_USER"
 fi

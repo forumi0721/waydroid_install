@@ -36,7 +36,7 @@ Usage: $(basename "$0") [OPTIONS]
 
 Options:
   -p, --install-pkgs        Install packages listed in arch_packages (pacman + AUR helper)
-  -u, --user <USERNAME>     Target user for user-level service and script (default: SUDO_USER or current user)
+  -u, --user <USERNAME>     Target user for user-level service and script (default: DOAS_USER, SUDO_USER or current user)
   --system-only             Install only system-level files and services (/etc, /usr/local/sbin)
   --user-only               Install only user-level files and services (~/.config, ~/.local/bin)
   --enable-linger           Enable loginctl linger for the user (runs user services without active login)
@@ -112,7 +112,9 @@ done
 # Determine Target User & Home
 # ------------------------------------------------------------------------------
 if [ -z "$TARGET_USER" ]; then
-    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    if [ -n "${DOAS_USER:-}" ] && [ "$DOAS_USER" != "root" ]; then
+        TARGET_USER="$DOAS_USER"
+    elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
         TARGET_USER="$SUDO_USER"
     elif [ "$(id -u)" -ne 0 ]; then
         TARGET_USER="$(id -un)"
@@ -179,7 +181,7 @@ fi
 # Check Privileges
 # ------------------------------------------------------------------------------
 if [ "$INSTALL_SYSTEM" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
-    log_err "System files installation requires root privileges. Please run with sudo."
+    log_err "System files installation requires root privileges. Please run with sudo or doas."
     exit 1
 fi
 
@@ -339,5 +341,5 @@ printf "\n"
 log_ok "Arch Linux Waydroid installation completed successfully!"
 if [ "$ENABLE_LINGER" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
     printf "\n${YELLOW}[TIP]${NC} To keep the headless Sway session running without logging in:\n"
-    printf "  ${BLUE}sudo loginctl enable-linger %s${NC}\n\n" "$TARGET_USER"
+    printf "  ${BLUE}doas loginctl enable-linger %s${NC}  # or sudo\n\n" "$TARGET_USER"
 fi

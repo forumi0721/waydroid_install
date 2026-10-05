@@ -1,0 +1,25 @@
+alpine-base
+android-build-tools
+android-tools-adb
+bash
+curl
+dbus
+doas
+doas-sudo-shim
+file
+git
+iproute2
+logrotate
+musl-utils
+openjdk17-jre-headless
+openssh
+pulseaudio
+rsync
+socat
+sway
+udev
+vim
+waydroid
+wayvnc
+# wsu><Q1yh9gKQAmwfjoQOS7nQzP5vvAEVk= (깨진 패키지명 또는 오타로 추정되어 주석 처리됨)
+zsh

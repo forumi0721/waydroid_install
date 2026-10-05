@@ -43,9 +43,11 @@ Options:
 
 Description:
   Installs Waydroid headless sway session and cgroup helper for Alpine LXC:
-    - /etc/init.d/alpine-cgroup             (OpenRC init script)
-    - /etc/init.d/waydroid-sway             (OpenRC init script)
-    - /usr/local/bin/waydroid-sway-session  (Sway & Waydroid startup session)
+    - /etc/init.d/alpine-cgroup             (LXC cgroup helper)
+    - /etc/init.d/waydroid-prepare           (OpenRC init script)
+    - /usr/local/sbin/waydroid-prepare       (Waydroid config/RRO preparation)
+    - /etc/init.d/waydroid-sway              (OpenRC init script)
+    - /usr/local/bin/waydroid-sway-session   (Sway & Waydroid runtime session)
 EOF
     exit 0
 }
@@ -105,10 +107,13 @@ if [ "$UNINSTALL" -eq 1 ]; then
 
     if command -v rc-update >/dev/null 2>&1; then
         rc-update del waydroid-sway default 2>/dev/null || true
+        rc-update del waydroid-prepare default 2>/dev/null || true
         rc-update del alpine-cgroup default 2>/dev/null || true
     fi
 
     rm -f /etc/init.d/alpine-cgroup
+    rm -f /etc/init.d/waydroid-prepare
+    rm -f /usr/local/sbin/waydroid-prepare
     rm -f /etc/init.d/waydroid-sway
     rm -f /usr/local/bin/waydroid-sway-session
 
@@ -183,12 +188,18 @@ install -d /etc/init.d
 install -m 755 "${SCRIPT_DIR}/system/alpine-cgroup" /etc/init.d/alpine-cgroup
 log_ok "Installed /etc/init.d/alpine-cgroup"
 
-# 2-2. /usr/local/bin/waydroid-sway-session
+# 2-2. /usr/local/sbin/waydroid-prepare + OpenRC service
+install -d /usr/local/sbin
+install -m 755 "${SCRIPT_DIR}/system/waydroid-prepare" /usr/local/sbin/waydroid-prepare
+install -m 755 "${SCRIPT_DIR}/system/waydroid-prepare.initd" /etc/init.d/waydroid-prepare
+log_ok "Installed Waydroid prepare service"
+
+# 2-3. /usr/local/bin/waydroid-sway-session
 install -d /usr/local/bin
 install -m 755 "${SCRIPT_DIR}/system/waydroid-sway-session" /usr/local/bin/waydroid-sway-session
 log_ok "Installed /usr/local/bin/waydroid-sway-session"
 
-# 2-3. /etc/init.d/waydroid-sway (with user template substitution)
+# 2-4. /etc/init.d/waydroid-sway (with user template substitution)
 TMP_INIT=$(mktemp)
 sed \
     -e "s|command_user=\".*\"|command_user=\"${TARGET_USER}:${TARGET_GROUP}\"|g" \
@@ -210,8 +221,9 @@ if [ "$ENABLE_SERVICE" -eq 1 ]; then
     if command -v rc-update >/dev/null 2>&1; then
         log_info "Adding services to default runlevel..."
         rc-update add alpine-cgroup default
+        rc-update add waydroid-prepare default
         rc-update add waydroid-sway default
-        log_ok "Registered 'alpine-cgroup' and 'waydroid-sway' in default runlevel."
+        log_ok "Registered alpine-cgroup, waydroid-prepare and waydroid-sway in default runlevel."
     else
         log_warn "rc-update not found. Skipping runlevel registration."
     fi
@@ -221,4 +233,5 @@ printf "\n"
 log_ok "Alpine LXC Waydroid installation completed successfully!"
 printf "You can start the service now using:\n"
 printf "  ${BLUE}rc-service alpine-cgroup start${NC}\n"
+printf "  ${BLUE}rc-service waydroid-prepare start${NC}\n"
 printf "  ${BLUE}rc-service waydroid-sway start${NC}\n\n"
